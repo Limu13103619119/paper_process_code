@@ -55,6 +55,7 @@ class PaperProcessor:
     def __init__(self, pdf_path, my_titles):
         self.pdf_path = pdf_path
         self.filename = os.path.basename(pdf_path)
+        self.pdf_error = ""
         try:
             self.doc = fitz.open(pdf_path)
         except Exception as e:
@@ -62,7 +63,6 @@ class PaperProcessor:
             self.doc = None
             self.pdf_error = str(e)
         self.my_titles = my_titles
-        self.pdf_error = ""
 
     def _summary_result(
         self,

@@ -1,3 +1,4 @@
+import csv
 import os
 import time
 import re
@@ -20,6 +21,30 @@ MY_PAPERS_DIR = "./my_papers"
 SOURCE_DIR = "./source_papers"
 OUTPUT_DIR = "./output_papers"
 
+SUMMARY_FIELDS = [
+    "paper_file",
+    "status",
+    "author_passed",
+    "target_author",
+    "matched_citation_count",
+    "matched_citations",
+    "error",
+]
+
+
+def write_summary_report(results, output_dir=OUTPUT_DIR):
+    """Write one CSV row for each source PDF processed in this run."""
+    os.makedirs(output_dir, exist_ok=True)
+    summary_path = os.path.join(output_dir, "summary.csv")
+    with open(summary_path, "w", newline="", encoding="utf-8-sig") as csv_file:
+        writer = csv.DictWriter(
+            csv_file, fieldnames=SUMMARY_FIELDS, extrasaction="ignore"
+        )
+        writer.writeheader()
+        writer.writerows(results)
+    return summary_path
+
+
 # ==============================================
 
 warnings.filterwarnings("ignore")
@@ -30,12 +55,33 @@ class PaperProcessor:
     def __init__(self, pdf_path, my_titles):
         self.pdf_path = pdf_path
         self.filename = os.path.basename(pdf_path)
+        self.pdf_error = ""
         try:
             self.doc = fitz.open(pdf_path)
         except Exception as e:
             print(f"  [!] PDF 损坏: {e}")
             self.doc = None
+            self.pdf_error = str(e)
         self.my_titles = my_titles
+
+    def _summary_result(
+        self,
+        status,
+        author_passed="",
+        target_author="",
+        matched_citations=None,
+        error="",
+    ):
+        matched_citations = matched_citations or []
+        return {
+            "paper_file": self.filename,
+            "status": status,
+            "author_passed": author_passed,
+            "target_author": target_author or "",
+            "matched_citation_count": len(matched_citations),
+            "matched_citations": "; ".join(matched_citations),
+            "error": error,
+        }
 
     def get_text_safe(self, page_num):
         if self.doc and page_num < len(self.doc):
@@ -197,35 +243,57 @@ class PaperProcessor:
                     pass
 
     def run(self):
-        if not self.doc: return
+        if not self.doc:
+            return self._summary_result("pdf_error", error=self.pdf_error)
+
         print(f"正在处理: {self.filename}")
 
         auth_res = self.check_authors()
-        if not auth_res or not auth_res.get('passed'):
-            return
+        if auth_res is None:
+            return self._summary_result(
+                "author_check_error",
+                error="Author screening request failed; see console output.",
+            )
+        if not auth_res.get("passed"):
+            return self._summary_result(
+                "author_rejected",
+                author_passed=False,
+                target_author=auth_res.get("target_author_name", ""),
+            )
 
-        target_author = auth_res.get('target_author_name')
+        target_author = auth_res.get("target_author_name", "")
         print(f"  [👤] 正教授/Fellow达标: {target_author}")
 
         valid_hits_map = {}
         all_markers = []
         for my_title in self.my_titles:
             marker = self.find_citation_marker(my_title)
-            if marker:
-                if self.evaluate_citation_quality(marker, my_title):
-                    print(f"    - 命中目标: {my_title[:15]}... -> {marker}")
-                    valid_hits_map[my_title] = marker
-                    all_markers.append(marker)
+            if marker and self.evaluate_citation_quality(marker, my_title):
+                print(f"    - 命中目标: {my_title[:15]}... -> {marker}")
+                valid_hits_map[my_title] = marker
+                all_markers.append(marker)
 
         if valid_hits_map:
             self.apply_all_highlights(target_author, all_markers)
             self.save_to_subfolders(valid_hits_map.keys())
-        else:
-            print("  [⚠️] 未找到有效引用")
+            return self._summary_result(
+                "matched",
+                author_passed=True,
+                target_author=target_author,
+                matched_citations=list(valid_hits_map.keys()),
+            )
+
+        print("  [⚠️] 未找到有效引用")
+        return self._summary_result(
+            "no_valid_citation",
+            author_passed=True,
+            target_author=target_author,
+        )
 
 
 if __name__ == "__main__":
-    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
     my_titles = []
     if os.path.exists(MY_PAPERS_DIR):
         for f in os.listdir(MY_PAPERS_DIR):
@@ -233,7 +301,25 @@ if __name__ == "__main__":
                 my_titles.append(os.path.splitext(f)[0])
     source_files = [f for f in os.listdir(SOURCE_DIR) if f.endswith(".pdf")]
     print(f"🚀 [正教授严格版] 启动")
+
+    results = []
     for filename in source_files:
         path = os.path.join(SOURCE_DIR, filename)
-        PaperProcessor(path, my_titles).run()
+        try:
+            result = PaperProcessor(path, my_titles).run()
+        except Exception as e:
+            print(f"  [!] 处理失败: {filename}: {e}")
+            result = {
+                "paper_file": filename,
+                "status": "processing_error",
+                "author_passed": "",
+                "target_author": "",
+                "matched_citation_count": 0,
+                "matched_citations": "",
+                "error": str(e),
+            }
+        results.append(result)
         print("-" * 40)
+
+    summary_path = write_summary_report(results)
+    print(f"📊 筛选汇总报告已保存: {summary_path}")
